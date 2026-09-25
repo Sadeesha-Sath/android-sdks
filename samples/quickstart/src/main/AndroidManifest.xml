@@ -11,10 +11,21 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The redirect URI a federated sign-in's provider returns to. The Custom Tab runs in
+                 this app's task, on top of this Activity, so singleTop would start a second
+                 instance for the callback. singleTask clears the tab and delivers the callback to
+                 the running Activity's onNewIntent instead. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="dev.thunderid.quickstart" />
             </intent-filter>
         </activity>
 
