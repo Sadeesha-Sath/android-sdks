@@ -154,4 +154,33 @@ class FlowMetaModelsTest {
         assertEquals("", resolver.resolve("{{ meta(application.missing) }}"))
         assertTrue(resolver.resolve(null).isEmpty())
     }
+
+    @Test
+    fun `template resolver translates a flow error key with its params`() {
+        val resolver =
+            FlowTemplateResolver(
+                mapOf(
+                    "i18n" to
+                        mapOf(
+                            "translations" to
+                                mapOf(
+                                    "errors" to mapOf("user.exists" to "{{param(name)}} existe déjà"),
+                                    "system" to mapOf("flow.invalid" to "Flux invalide"),
+                                ),
+                        ),
+                ),
+            )
+
+        assertEquals(
+            "alice existe déjà",
+            resolver.translate(FlowErrorText("errors.user.exists", "alice already exists", mapOf("name" to "alice"))),
+        )
+        // A key with no translation of its own is retried under the system namespace.
+        assertEquals("Flux invalide", resolver.translate(FlowErrorText("flow.invalid", "Invalid flow")))
+        // A placeholder left without a param, or a key with no translation, leaves the caller to its fallback.
+        assertNull(resolver.translate(FlowErrorText("errors.user.exists", "alice already exists")))
+        assertNull(resolver.translate(FlowErrorText("errors.missing", "Missing")))
+        assertNull(resolver.translate(FlowErrorText(defaultValue = "No key")))
+        assertNull(resolver.translate(null))
+    }
 }

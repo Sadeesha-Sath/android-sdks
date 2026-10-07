@@ -3,6 +3,7 @@
 
 package dev.thunderid.compose.components.presentation.auth
 
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,93 +13,32 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.thunderid.android.EmbeddedFlowResponse
 import dev.thunderid.android.EmbeddedSignInPayload
-import dev.thunderid.android.FlowAction
-import dev.thunderid.android.FlowInput
 import dev.thunderid.android.FlowStatus
 import dev.thunderid.compose.LocalThunderID
 import dev.thunderid.compose.ThunderIDState
 import dev.thunderid.compose.components.actions.BaseSignUpButton
 import dev.thunderid.compose.components.exposeTestTagsAsResourceIds
+import dev.thunderid.compose.i18n.FlowTemplateResolver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** State passed to the [BaseSignUp] builder slot. */
 @Stable
-class SignUpState {
-    var inputs by mutableStateOf<List<FlowInput>>(emptyList())
-        internal set
-    var actions by mutableStateOf<List<FlowAction>>(emptyList())
-        internal set
-    var isLoading by mutableStateOf(false)
-        internal set
-    var error by mutableStateOf<String?>(null)
-        internal set
-
-    internal var flowId: String? = null
-    internal var challengeToken: String? = null
-    internal var onSubmit: (String) -> Unit = {}
-    private val fieldValues = mutableStateMapOf<String, String>()
-
-    fun fieldValue(name: String): String = fieldValues[name] ?: ""
-
-    fun setField(
-        name: String,
-        value: String,
-    ) {
-        fieldValues[name] = value
-    }
-
-    fun fields(): Map<String, String> = fieldValues.toMap()
-
-    fun submit(actionId: String) = onSubmit(actionId)
-
-    internal fun update(response: EmbeddedFlowResponse) {
-        flowId = response.flowId
-        challengeToken = response.challengeToken
-        inputs = response.data?.inputs ?: emptyList()
-        actions = response.data?.actions ?: emptyList()
-        seedFieldValues()
-    }
-
-    /**
-     * Two failure modes come from the same source — [fieldValues] only ever grows via
-     * [setField], never shrinks or gets pre-populated:
-     *
-     * 1. A field the user never focuses never gets an entry, since the field only writes on
-     *    change. Submitting with that key missing — as opposed to present but empty — makes
-     *    the server re-prompt for just that field with no action to submit it through,
-     *    permanently stalling the flow.
-     * 2. A field from a *previous* step lingers in [fieldValues] (it's never cleared on
-     *    advancing), so the next step's submission carries it along unasked. The server
-     *    interprets that leaked field as an attempt to re-satisfy the earlier step and
-     *    bounces the flow back to it instead of processing the current one.
-     *
-     * Recomputing [fieldValues] from scratch on every step — keeping only values for names
-     * the current step's [inputs] actually declare, defaulting anything newly required to an
-     * empty string — keeps a submission limited to exactly what this step asks for, never
-     * more or less.
-     */
-    private fun seedFieldValues() {
-        val currentNames = inputs.map { it.name }.toSet()
-        fieldValues.keys.retainAll(currentNames)
-        for (name in currentNames) {
-            if (name !in fieldValues) fieldValues[name] = ""
-        }
-    }
+class SignUpState : FlowStepState() {
+    override val i18nPrefix = "signUp"
 }
 
 /** App-native sign-up form (spec §8.4 Presentation). */
@@ -115,30 +55,45 @@ fun SignUp(
             modifier = Modifier.padding(16.dp).exposeTestTagsAsResourceIds(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            BasicText(i18n.resolve("signUp.title"))
-            state.error?.let { BasicText(it) }
-            state.inputs.forEach { input ->
-                BasicTextField(
-                    value = state.fieldValue(input.name),
-                    onValueChange = { state.setField(input.name, it) },
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .defaultMinSize(minHeight = 44.dp)
-                            .testTag("thunderid-field-${input.name}")
-                            .semantics { contentDescription = input.name },
-                )
-            }
-            state.actions.forEach { action ->
-                val actionId = action.id ?: action.ref ?: ""
-                BaseSignUpButton(
-                    label = action.label ?: i18n.resolve("signUp.submit"),
-                    modifier = Modifier.testTag("thunderid-action-$actionId"),
-                ) {
-                    state.submit(actionId)
+            // The form stays below the error so the user can correct their input and retry.
+            state.error?.let { FlowErrorBanner(message = it) }
+            if (state.components.isNotEmpty()) {
+                state.components.forEach { component ->
+                    FlowStepComponentView(
+                        component = component,
+                        state = state,
+                        i18n = i18n,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
+            } else {
+                BasicText(i18n.resolve("signUp.title"))
+                state.inputs.forEach { input ->
+                    BasicTextField(
+                        value = state.fieldValue(input.name),
+                        onValueChange = { state.setField(input.name, it) },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 44.dp)
+                                .testTag("thunderid-field-${input.name}")
+                                .semantics { contentDescription = input.name },
+                    )
+                }
+                state.actions.forEach { action ->
+                    val actionId = action.id ?: action.ref ?: ""
+                    BaseSignUpButton(
+                        label =
+                            state.templateResolver?.resolve(action.label)?.takeIf { it.isNotBlank() }
+                                ?: action.label
+                                ?: i18n.resolve("signUp.submit"),
+                        modifier = Modifier.testTag("thunderid-action-$actionId"),
+                    ) {
+                        state.submit(actionId)
+                    }
+                }
+                if (state.isLoading) BasicText(i18n.resolve("signUp.loading"))
             }
-            if (state.isLoading) BasicText(i18n.resolve("signUp.loading"))
         }
     }
 }
@@ -152,12 +107,16 @@ fun BaseSignUp(
     content: @Composable (SignUpState) -> Unit,
 ) {
     val thunderState = LocalThunderID.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val signUpState = remember { SignUpState() }
 
-    signUpState.onSubmit = { actionId ->
+    signUpState.onSubmit = onSubmit@{ actionId ->
+        // Ignore taps while a step is in flight, so a double tap does not submit it twice.
+        if (signUpState.isLoading) return@onSubmit
+        signUpState.isLoading = true
+        signUpState.loadingActionId = actionId
         scope.launch {
-            signUpState.isLoading = true
             signUpState.error = null
             try {
                 val payload =
@@ -168,12 +127,15 @@ fun BaseSignUp(
                         challengeToken = signUpState.challengeToken,
                     )
                 val response = thunderState.client.signUp(payload = payload)
-                handleSignUpResponse(response, signUpState, thunderState, onComplete, onError)
+                handleSignUpResponse(response, actionId, signUpState, thunderState, context, onComplete, onError)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 signUpState.error = e.message
                 onError?.invoke(e.message ?: "Sign-up failed")
             } finally {
                 signUpState.isLoading = false
+                signUpState.loadingActionId = null
             }
         }
     }
@@ -182,7 +144,9 @@ fun BaseSignUp(
         signUpState.isLoading = true
         try {
             val response = thunderState.client.signUp()
-            handleSignUpResponse(response, signUpState, thunderState, onComplete, onError)
+            handleSignUpResponse(response, null, signUpState, thunderState, context, onComplete, onError)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             signUpState.error = e.message
             onError?.invoke(e.message ?: "Sign-up failed")
@@ -191,18 +155,37 @@ fun BaseSignUp(
         }
     }
 
+    // Resolves `{{ t(...) }}` labels in the component tree; a failure only leaves them unresolved.
+    LaunchedEffect(Unit) {
+        try {
+            val applicationId = thunderState.client.getConfiguration().applicationId ?: return@LaunchedEffect
+            signUpState.templateResolver = FlowTemplateResolver(thunderState.client.getFlowMeta(applicationId))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SignUpFlow", "Flow meta fetch failed (${diagnosticLabel(e)})")
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { signUpState.clearFields() }
+    }
+
     Box(modifier = modifier) { content(signUpState) }
 }
 
-private suspend fun handleSignUpResponse(
+internal suspend fun handleSignUpResponse(
     response: EmbeddedFlowResponse,
+    actionId: String?,
     state: SignUpState,
     thunderState: ThunderIDState,
+    context: Context,
     onComplete: (() -> Unit)?,
     onError: ((String) -> Unit)?,
 ) {
     when (response.flowStatus) {
         FlowStatus.COMPLETE -> {
+            state.clearFields()
             thunderState.refresh()
             onComplete?.invoke()
         }
@@ -212,11 +195,31 @@ private suspend fun handleSignUpResponse(
         // Rendering only PROMPT_ONLY therefore dropped the whole form, leaving an empty sheet.
         // SignIn already treats the two the same way.
         FlowStatus.PROMPT_ONLY, FlowStatus.INCOMPLETE -> {
-            state.update(response)
+            // A federated sign-up (e.g. ahead of an account-linking prompt) arrives as a
+            // REDIRECTION step: follow it rather than rendering an empty form.
+            if (response.type == "REDIRECTION") {
+                followFederatedRedirect(response, actionId, state, thunderState, context, onError) { payload ->
+                    handleSignUpResponse(
+                        thunderState.client.signUp(payload = payload),
+                        actionId,
+                        state,
+                        thunderState,
+                        context,
+                        onComplete,
+                        onError,
+                    )
+                }
+            } else {
+                state.update(response)
+            }
         }
 
         FlowStatus.ERROR -> {
-            val msg = response.failureReason ?: "Sign-up failed"
+            // The translated message, as the JavaScript SDK shows it, before the server's English fallback.
+            val msg =
+                state.templateResolver?.translate(response.error?.message)
+                    ?: response.failureReason
+                    ?: "Sign-up failed"
             state.error = msg
             onError?.invoke(msg)
         }

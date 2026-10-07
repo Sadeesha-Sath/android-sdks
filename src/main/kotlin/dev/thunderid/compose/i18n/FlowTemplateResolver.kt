@@ -3,6 +3,8 @@
 
 package dev.thunderid.compose.i18n
 
+import dev.thunderid.android.FlowErrorText
+
 /**
  * Resolves `{{ t(key) }}` and `{{ meta(path) }}` template literals embedded in server-returned
  * component labels and placeholders.
@@ -21,6 +23,24 @@ class FlowTemplateResolver(
 ) {
     companion object {
         private val TEMPLATE_REGEX = Regex("\\{\\{\\s*(.*?)\\s*\\}\\}")
+        private val PARAM_REGEX = Regex("\\{\\{\\s*param\\(\\s*(\\w+)\\s*\\)\\s*\\}\\}")
+    }
+
+    /**
+     * The translation of a flow error's `key`, with its `params` substituted, or null when there is
+     * none to show. As in the JavaScript SDK, the key is looked up as `<namespace>.<key>` and then
+     * under the `system` namespace, and a translation that still has a placeholder is not used.
+     */
+    fun translate(text: FlowErrorText?): String? {
+        val key = text?.key?.takeIf { it.isNotBlank() } ?: return null
+        return listOf(key, "system.$key").firstNotNullOfOrNull { candidate ->
+            val dot = candidate.indexOf('.')
+            if (dot == -1) return@firstNotNullOfOrNull null
+            val translation =
+                resolveTranslation("${candidate.substring(0, dot)}:${candidate.substring(dot + 1)}")
+                    .replace(PARAM_REGEX) { text.params?.get(it.groupValues[1]) ?: it.value }
+            translation.takeIf { it.isNotEmpty() && !PARAM_REGEX.containsMatchIn(it) }
+        }
     }
 
     fun resolve(text: String?): String {

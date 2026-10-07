@@ -24,7 +24,9 @@ internal class FlowExecutionClient(
                 "flowType" to flowType.value,
                 "verbose" to true,
             )
-        return httpClient.post("/flow/execute", body, requiresAuth = false, headers = attestationTokenHeaders(attestationToken))
+        return httpClient
+            .post<EmbeddedFlowResponse>("/flow/execute", body, requiresAuth = false, headers = attestationTokenHeaders(attestationToken))
+            .withErrorAsFailureReason()
     }
 
     suspend fun submit(
@@ -36,7 +38,7 @@ internal class FlowExecutionClient(
         val body = submitBody(flowId, actionId, challengeToken).toMutableMap()
         body["verbose"] = true
         if (inputs.isNotEmpty()) body["inputs"] = inputs
-        return httpClient.post("/flow/execute", body, requiresAuth = false)
+        return httpClient.post<EmbeddedFlowResponse>("/flow/execute", body, requiresAuth = false).withErrorAsFailureReason()
     }
 
     private fun attestationTokenHeaders(token: String?): Map<String, String> = token?.let { mapOf("Attestation-Token" to it) } ?: emptyMap()
@@ -52,3 +54,7 @@ internal class FlowExecutionClient(
         return body
     }
 }
+
+/** Surfaces the `error` object's text through `failureReason`, which the UI already shows. */
+internal fun EmbeddedFlowResponse.withErrorAsFailureReason(): EmbeddedFlowResponse =
+    copy(failureReason = error?.message?.defaultValue ?: error?.description?.defaultValue ?: failureReason)

@@ -147,6 +147,22 @@ data class EmbeddedFlowResponse(
     val assertion: String? = null,
     val failureReason: String? = null,
     val challengeToken: String? = null,
+    val error: FlowError? = null,
+)
+
+/** The flow execution `error` object, which replaced `failureReason`. */
+data class FlowError(
+    val code: String? = null,
+    val message: FlowErrorText? = null,
+    val description: FlowErrorText? = null,
+)
+
+data class FlowErrorText(
+    val key: String? = null,
+    /** The untranslated text, with [params] already substituted. */
+    val defaultValue: String? = null,
+    /** Values for the `{{param(name)}}` placeholders a translation of [key] keeps. */
+    val params: Map<String, String>? = null,
 )
 
 enum class FlowStatus { PROMPT_ONLY, INCOMPLETE, COMPLETE, ERROR }

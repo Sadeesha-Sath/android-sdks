@@ -17,6 +17,7 @@ object DefaultStrings {
             "signUp.title" to "Create account",
             "signUp.submit" to "Create account",
             "signUp.loading" to "Creating account…",
+            "signUp.federatedError" to "Could not start federated sign-up",
             "signOut.button" to "Sign out",
             "signOut.loading" to "Signing out…",
             "callback.loading" to "Completing sign-in…",

@@ -75,9 +75,13 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
-/** State passed to the [BaseSignIn] builder slot. */
+/**
+ * Step state shared by [SignInState] and [SignUpState]: the current step's inputs, actions,
+ * component tree and `additionalData`, plus the entered field values. The flow-component
+ * renderer and the federated-redirect handling work on either through this type.
+ */
 @Stable
-class SignInState {
+abstract class FlowStepState internal constructor() {
     var inputs by mutableStateOf<List<FlowInput>>(emptyList())
         internal set
     var actions by mutableStateOf<List<FlowAction>>(emptyList())
@@ -129,6 +133,9 @@ class SignInState {
 
     fun submit(actionId: String) = onSubmit(actionId)
 
+    /** The i18n namespace (`signIn`/`signUp`) for fallback labels and messages. */
+    internal abstract val i18nPrefix: String
+
     internal fun update(response: EmbeddedFlowResponse) {
         flowId = response.flowId
         challengeToken = response.challengeToken
@@ -166,6 +173,12 @@ class SignInState {
             if (name !in fieldValues) fieldValues[name] = ""
         }
     }
+}
+
+/** State passed to the [BaseSignIn] builder slot. */
+@Stable
+class SignInState : FlowStepState() {
+    override val i18nPrefix = "signIn"
 }
 
 /**
@@ -308,8 +321,17 @@ fun FlowComponentView(
     signInState: SignInState,
     i18n: ThunderIDI18n,
     modifier: Modifier = Modifier,
+) = FlowStepComponentView(component, signInState, i18n, modifier)
+
+/** [FlowComponentView] for any flow's step state, so sign-up renders the same component tree. */
+@Composable
+internal fun FlowStepComponentView(
+    component: FlowComponent,
+    state: FlowStepState,
+    i18n: ThunderIDI18n,
+    modifier: Modifier = Modifier,
 ) {
-    val resolver = signInState.templateResolver
+    val resolver = state.templateResolver
     when {
         component.type == "DIVIDER" -> {
             DividerRow(component = component, resolver = resolver, modifier = modifier)
@@ -323,8 +345,8 @@ fun FlowComponentView(
                     modifier = modifier,
                     onActionRef = { actionRef ->
                         val action =
-                            signInState.actions.firstOrNull { it.identifierKey() == actionRef } ?: return@RichTextView
-                        signInState.submit(action.id ?: action.ref ?: return@RichTextView)
+                            state.actions.firstOrNull { it.identifierKey() == actionRef } ?: return@RichTextView
+                        state.submit(action.id ?: action.ref ?: return@RichTextView)
                     },
                 )
             }
@@ -354,9 +376,9 @@ fun FlowComponentView(
         component.type == "BLOCK" -> {
             Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 component.components?.forEach { child ->
-                    FlowComponentView(
+                    FlowStepComponentView(
                         component = child,
-                        signInState = signInState,
+                        state = state,
                         i18n = i18n,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -365,17 +387,17 @@ fun FlowComponentView(
         }
 
         component.type == "ACTION" -> {
-            ActionComponentView(component = component, signInState = signInState, i18n = i18n, modifier = modifier)
+            ActionComponentView(component = component, state = state, i18n = i18n, modifier = modifier)
         }
 
         component.type?.endsWith("_INPUT") == true -> {
-            FieldComponentView(component = component, signInState = signInState, modifier = modifier)
+            FieldComponentView(component = component, state = state, modifier = modifier)
         }
 
         component.type == "KEY_VALUE_LIST" -> {
             val pairs =
                 KeyValuePair
-                    .list(component.source?.let { signInState.additionalData[it] })
+                    .list(component.source?.let { state.additionalData[it] })
                     .map { it.copy(label = resolver?.resolve(it.label) ?: it.label) }
             // An empty panel tells the user nothing, so a list with no pairs renders nothing at all.
             if (pairs.isNotEmpty()) {
@@ -396,19 +418,19 @@ fun FlowComponentView(
 @Composable
 private fun FieldComponentView(
     component: FlowComponent,
-    signInState: SignInState,
+    state: FlowStepState,
     modifier: Modifier = Modifier,
 ) {
     val ref = component.ref ?: component.id ?: return
-    val resolver = signInState.templateResolver
+    val resolver = state.templateResolver
     val resolvedLabel =
         resolver?.resolve(component.label)?.takeIf { it.isNotBlank() }
             ?: component.label?.takeIf { it.isNotBlank() }
             ?: ref.replaceFirstChar { it.uppercase() }
     val isPassword = component.type == "PASSWORD_INPUT"
     OutlinedTextField(
-        value = signInState.fieldValue(ref),
-        onValueChange = { signInState.setField(ref, it) },
+        value = state.fieldValue(ref),
+        onValueChange = { state.setField(ref, it) },
         modifier =
             modifier
                 .fillMaxWidth()
@@ -426,18 +448,18 @@ private fun FieldComponentView(
 @Composable
 private fun ActionComponentView(
     component: FlowComponent,
-    signInState: SignInState,
+    state: FlowStepState,
     i18n: ThunderIDI18n,
     modifier: Modifier = Modifier,
 ) {
     val componentKey = component.identifierKey() ?: return
-    val action = signInState.actions.firstOrNull { it.identifierKey() == componentKey } ?: return
+    val action = state.actions.firstOrNull { it.identifierKey() == componentKey } ?: return
     val actionId = action.id ?: action.ref ?: return
-    val resolver = signInState.templateResolver
+    val resolver = state.templateResolver
     val label =
         resolver?.resolve(action.label)?.takeIf { it.isNotBlank() }
             ?: action.label?.takeIf { it.isNotBlank() }
-            ?: i18n.resolve("signIn.submit")
+            ?: i18n.resolve("${state.i18nPrefix}.submit")
     val isTrigger = action.eventType?.uppercase() == "TRIGGER"
     val identity = ((action.icon ?: "") + (action.ref ?: "") + (action.label ?: "")).lowercase()
     val taggedModifier = modifier.testTag("thunderid-action-$actionId")
@@ -445,9 +467,9 @@ private fun ActionComponentView(
     // Only the button matching the in-flight submission shows a spinner; the rest stay
     // disabled (to prevent overlapping submits) but keep their label instead of every
     // button spinning together.
-    val isActiveAction = signInState.loadingActionId == null || signInState.loadingActionId == actionId
-    val isSpinning = signInState.isLoading && isActiveAction
-    val isBlocked = signInState.isLoading && !isActiveAction
+    val isActiveAction = state.loadingActionId == null || state.loadingActionId == actionId
+    val isSpinning = state.isLoading && isActiveAction
+    val isBlocked = state.isLoading && !isActiveAction
 
     if (isTrigger) {
         when {
@@ -455,7 +477,7 @@ private fun ActionComponentView(
                 GoogleButton(
                     label = label,
                     isLoading = isSpinning,
-                    onClick = { signInState.submit(actionId) },
+                    onClick = { state.submit(actionId) },
                     modifier = taggedModifier,
                     disabled = isBlocked,
                 )
@@ -465,7 +487,7 @@ private fun ActionComponentView(
                 GitHubButton(
                     label = label,
                     isLoading = isSpinning,
-                    onClick = { signInState.submit(actionId) },
+                    onClick = { state.submit(actionId) },
                     modifier = taggedModifier,
                     disabled = isBlocked,
                 )
@@ -475,7 +497,7 @@ private fun ActionComponentView(
                 PasskeyButton(
                     label = label,
                     isLoading = isSpinning,
-                    onClick = { signInState.submit(actionId) },
+                    onClick = { state.submit(actionId) },
                     modifier = taggedModifier,
                     disabled = isBlocked,
                 )
@@ -485,7 +507,7 @@ private fun ActionComponentView(
                 OutlinedTriggerButton(
                     label = label,
                     isLoading = isSpinning,
-                    onClick = { signInState.submit(actionId) },
+                    onClick = { state.submit(actionId) },
                     modifier = taggedModifier,
                     disabled = isBlocked,
                 )
@@ -495,8 +517,8 @@ private fun ActionComponentView(
         // Stock M3 outlined button so it pairs with the filled primary Button below; the
         // federated trigger chrome (TriggerButtonStyle) has a different shape and type scale.
         OutlinedButton(
-            onClick = { signInState.submit(actionId) },
-            enabled = !signInState.isLoading,
+            onClick = { state.submit(actionId) },
+            enabled = !state.isLoading,
             modifier = taggedModifier.fillMaxWidth(),
         ) {
             if (isSpinning) {
@@ -507,8 +529,8 @@ private fun ActionComponentView(
         }
     } else {
         Button(
-            onClick = { signInState.submit(actionId) },
-            enabled = !signInState.isLoading,
+            onClick = { state.submit(actionId) },
+            enabled = !state.isLoading,
             modifier = taggedModifier.fillMaxWidth(),
         ) {
             if (isSpinning) {
@@ -764,17 +786,19 @@ internal suspend fun handleSignInResponse(
             }
 
             if (response.type == "REDIRECTION") {
-                followFederatedRedirect(
-                    response = response,
-                    actionId = actionId,
-                    signInState = signInState,
-                    thunderState = thunderState,
-                    request = request,
-                    context = context,
-                    passkeyClient = passkeyClient,
-                    onComplete = onComplete,
-                    onError = onError,
-                )
+                followFederatedRedirect(response, actionId, signInState, thunderState, context, onError) { payload ->
+                    handleSignInResponse(
+                        thunderState.client.signIn(payload = payload, request = request),
+                        actionId,
+                        signInState,
+                        thunderState,
+                        request,
+                        context,
+                        passkeyClient,
+                        onComplete,
+                        onError,
+                    )
+                }
                 return
             }
 
@@ -782,7 +806,11 @@ internal suspend fun handleSignInResponse(
         }
 
         FlowStatus.ERROR -> {
-            val msg = response.failureReason ?: "Sign-in failed"
+            // The translated message, as the JavaScript SDK shows it, before the server's English fallback.
+            val msg =
+                signInState.templateResolver?.translate(response.error?.message)
+                    ?: response.failureReason
+                    ?: "Sign-in failed"
             signInState.error = msg
             onError?.invoke(msg)
         }
@@ -840,35 +868,34 @@ private suspend fun performPasskeyCeremony(
 }
 
 /**
- * Follows a `REDIRECTION` step, which a federated/social TRIGGER action answers with: opens the
- * provider's `redirectURL` in a Custom Tab through [FederatedAuthSession], and resubmits the flow
- * with the `code` the provider's callback carries. The host Activity hands that callback to
- * [FederatedAuthSession.onRedirect]. Dismissing the browser leaves the step as it was, with no
- * error, so the user can pick an option again.
+ * Follows a `REDIRECTION` step, which a federated/social TRIGGER action (or a federated sign-up)
+ * answers with: opens the provider's `redirectURL` in a Custom Tab through [FederatedAuthSession],
+ * and hands [resubmit] the flow payload carrying the `code` the provider's callback returns. The
+ * host Activity hands that callback to [FederatedAuthSession.onRedirect]. Dismissing the browser
+ * leaves the step as it was, with no error, so the user can pick an option again.
  */
-private suspend fun followFederatedRedirect(
+internal suspend fun followFederatedRedirect(
     response: EmbeddedFlowResponse,
     actionId: String?,
-    signInState: SignInState,
+    state: FlowStepState,
     thunderState: ThunderIDState,
-    request: EmbeddedFlowRequestConfig,
     context: Context,
-    passkeyClient: PasskeyClient,
-    onComplete: (() -> Unit)?,
     onError: ((String) -> Unit)?,
+    resubmit: suspend (EmbeddedSignInPayload) -> Unit,
 ) {
     val redirectUrl = response.data?.redirectURL
-    val flowId = response.flowId ?: signInState.flowId
+    val flowId = response.flowId ?: state.flowId
+    val federatedError = "${state.i18nPrefix}.federatedError"
     if (redirectUrl.isNullOrEmpty() || flowId == null) {
-        val msg = thunderState.i18n.resolve("signIn.federatedError")
-        signInState.error = msg
+        val msg = thunderState.i18n.resolve(federatedError)
+        state.error = msg
         onError?.invoke(msg)
         return
     }
     // The step may have rotated the challenge token. Keep it, so picking an option again after
     // dismissing the browser does not resubmit a spent one.
-    signInState.flowId = flowId
-    signInState.challengeToken = response.challengeToken ?: signInState.challengeToken
+    state.flowId = flowId
+    state.challengeToken = response.challengeToken ?: state.challengeToken
 
     val callback =
         try {
@@ -886,36 +913,25 @@ private suspend fun followFederatedRedirect(
         // Any app can send the host Activity a callback, so one that does not echo the state this
         // sign-in was started with is not the provider's answer to it. A request without a state
         // leaves nothing to check the callback against, so it is rejected too.
-        val state = callback.getQueryParameter("state")
+        val callbackState = callback.getQueryParameter("state")
         val expectedState = Uri.parse(redirectUrl).getQueryParameter("state")
-        if (expectedState.isNullOrEmpty() || state != expectedState) {
+        if (expectedState.isNullOrEmpty() || callbackState != expectedState) {
             throw IAMException(ThunderIDErrorCode.INVALID_GRANT, "Callback state does not match the sign-in request")
         }
-        val payload =
+        resubmit(
             EmbeddedSignInPayload(
                 flowId = flowId,
                 actionId = actionId,
                 inputs = mapOf("code" to code, "state" to expectedState),
-                challengeToken = signInState.challengeToken,
-            )
-        val nextResponse = thunderState.client.signIn(payload = payload, request = request)
-        handleSignInResponse(
-            nextResponse,
-            actionId,
-            signInState,
-            thunderState,
-            request,
-            context,
-            passkeyClient,
-            onComplete,
-            onError,
+                challengeToken = state.challengeToken,
+            ),
         )
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        android.util.Log.e("SignInFlow", "Federated sign-in failed (${diagnosticLabel(e)})")
-        val msg = e.message ?: thunderState.i18n.resolve("signIn.federatedError")
-        signInState.error = msg
+        android.util.Log.e("SignInFlow", "Federated redirect failed (${diagnosticLabel(e)})")
+        val msg = e.message ?: thunderState.i18n.resolve(federatedError)
+        state.error = msg
         onError?.invoke(msg)
     }
 }
@@ -925,7 +941,7 @@ private suspend fun followFederatedRedirect(
  * [IAMException], or the exception class name otherwise. Keeps log output compact and
  * stable instead of dumping full exception detail.
  */
-private fun diagnosticLabel(e: Throwable): String =
+internal fun diagnosticLabel(e: Throwable): String =
     when (e) {
         is IAMException -> "code=${e.code.value}"
         else -> "type=${e.javaClass.simpleName}"
